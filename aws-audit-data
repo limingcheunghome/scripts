@@ -1,0 +1,44 @@
+#! /bin/sh
+
+# aws-audit-data <begin> <end> <outdir> <dev|qa|staging|prod>
+# Downloads aws audit events
+# - created between datetimes <begin> and <end> (potentially partial, ISO 8601 timestamps like: 2021-04-27T1 or 2021-12-02T15:57:00Z)
+# - for the $ENVIRONMENT env var (one of {prod, staging, dev}) set by e.g. running the `. aws-login` script
+#
+# Example `aws-audit-data <begin> <end> /c/work/liming
+
+# Trap interrupts and exit instead of continuing the loop
+trap "echo Exiting on keyboard interrupt!; exit;" SIGINT SIGTERM
+
+
+if [[ $# -ne 4 ]]; then echo 'Usage: aws-audit-data <begin> <end> <outdir> <table-prefix> # picks up $ENVIRONMENT env var set by `. aws-login` script'; exit -1; fi
+if [[ -z "${ENVIRONMENT}" ]]; then echo 'must set $ENVIRONMENT env e.g. by running `. aws-login` script'; exit -1; fi
+
+BUCKET=$ENVIRONMENT-respect-audit-logs
+BEGIN="$1"
+END="$2"
+OUTDIR="$3"
+if ! [[ -d ${OUTDIR} ]]; then echo '3rd arg <outdir> must be a directory'; exit -1; fi
+MONTH=${BEGIN:0:7}
+TABLEPREFIX="$4"
+TABLENAME="$4-respect-audit-logs"
+FILENAME="$OUTDIR/auditrecords.json"
+echo liming month is ${MONTH} and table name ${TABLENAME} and write to file $FILENAME
+echo ${BEGIN} and ${END}
+
+
+aws dynamodb query \
+  --output json \
+  --table-name $TABLENAME \
+  --index-name event-year-month-index \
+  --filter-expression "event.#ea = :actionCreate OR event.#ea = :actionUpdate OR event.#ea = :actionRead" \
+  --key-condition-expression "metaEventYearMonth = :yearMonth AND metaEventDate BETWEEN :start and :end" \
+  --expression-attribute-names '{"#ea":"action"}' \
+  --expression-attribute-values '{ ":yearMonth": { "S": '\"$MONTH\"' }, ":start": { "S": '\"$BEGIN\"' }, ":end": { "S": '\"$END\"' }, ":actionCreate": { "S": "create" }, ":actionUpdate": { "S": "update" }, ":actionRead": { "S": "read" } }' \
+   | jq '.Items[] | [{ action: .event.M.action.S, patientCHI: .objects.L[] | select(.M.type.S == "person") .M.id.M.value.S, user: .actors.L[] | select(.M.role.S == "user") .M.id.M.value.S, time: .metaEventDate.S }]' \
+  > "$FILENAME"
+
+
+ENV_LOWER=$(echo "$ENVIRONMENT" | tr '[:upper:]' '[:lower:]')
+
+if [[ "${ENV_LOWER}" == *"prod"* ]]; then echo ''; echo 'WARNING: logs may contain PII, delete after use '; fi
